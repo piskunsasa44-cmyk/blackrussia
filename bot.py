@@ -85,7 +85,7 @@ DB = load_db()
 def accs_of(srv_id: int) -> list:
     return [a for a in DB["accounts"] if a["serverId"] == srv_id]
 
-def acc_by_id(acc_id: int) -> dict | None:
+def acc_by_id(acc_id: int):
     return next((a for a in DB["accounts"] if a["id"] == acc_id), None)
 
 def new_id() -> int:
