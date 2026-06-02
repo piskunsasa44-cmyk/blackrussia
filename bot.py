@@ -22,7 +22,6 @@ logging.basicConfig(
 #  КОНФИГ (берётся из переменных окружения)
 # ─────────────────────────────────────────────
 TOKEN        = os.environ.get("BOT_TOKEN", "")
-ALLOWED_ID   = int(os.environ.get("ALLOWED_USER_ID", "0"))  # 0 = любой (небезопасно!)
 DATA_FILE    = "data.json"
 SRV_PER_PAGE = 10   # серверов на одной странице
 
