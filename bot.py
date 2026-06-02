@@ -100,8 +100,9 @@ def fmt_money(n) -> str:
 #  АВТОРИЗАЦИЯ — только ты пользуешься ботом
 # ─────────────────────────────────────────────
 def is_allowed(update: Update) -> bool:
-    uid = update.effective_user.id if update.effective_user else 0
-    return ALLOWED_ID == 0 or uid == ALLOWED_ID
+103     uid = update.effective_user.id if update.effective_user else 0
+104     ALLOWED_IDS = [int(x) for x in os.environ.get("ALLOWED_USER_ID", "0").split(",")]
+105     return 0 in ALLOWED_IDS or uid in ALLOWED_IDS
 
 # ─────────────────────────────────────────────
 #  КЛАВИАТУРЫ
