@@ -85,7 +85,7 @@ DB = load_db()
 def accs_of(srv_id: int) -> list:
     return [a for a in DB["accounts"] if a["serverId"] == srv_id]
 
-def acc_by_id(acc_id: int):
+def acc_by_id(acc_id: int) -> dict | None:
     return next((a for a in DB["accounts"] if a["id"] == acc_id), None)
 
 def new_id() -> int:
@@ -100,9 +100,9 @@ def fmt_money(n) -> str:
 #  АВТОРИЗАЦИЯ — только ты пользуешься ботом
 # ─────────────────────────────────────────────
 def is_allowed(update: Update) -> bool:
-103     uid = update.effective_user.id if update.effective_user else 0
-104     ALLOWED_IDS = [int(x) for x in os.environ.get("ALLOWED_USER_ID", "0").split(",")]
-105     return 0 in ALLOWED_IDS or uid in ALLOWED_IDS
+    ALLOWED_IDS = [int(x) for x in os.environ.get("ALLOWED_USER_ID", "0").split(",")]
+    uid = update.effective_user.id if update.effective_user else 0
+    return 0 in ALLOWED_IDS or uid in ALLOWED_IDS
 
 # ─────────────────────────────────────────────
 #  КЛАВИАТУРЫ
