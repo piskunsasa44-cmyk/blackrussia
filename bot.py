@@ -1,3 +1,132 @@
+# ─────────────────────────────────────────────
+#  ПАРСЕР СООБЩЕНИЙ (MoneyTravis + ручной ввод)
+# ─────────────────────────────────────────────
+import re as _re
+
+def _parse_moneytravis(text: str) -> dict | None:
+    """
+    Парсит 3 формата:
+    1) MoneyTravis Telegram-форма (Сервер: X (#N), Никнейм: ..., Пароль: ...)
+    2) MoneyTravis детали заказа (CITY (#N) на отдельной строке, потом Ник/Пароль)
+    3) Ручной ввод: "сервер ник пароль [деньги]"
+    """
+    result = {}
+
+    # ── Формат 1 и 2: ищем (#номер) ─────────────────────────────────────────
+    m = _re.search(r'\(#(\d+)\)', text)
+    if m:
+        result['serverId'] = int(m.group(1))
+
+        # Ник — ищем после Никнейм/Ник/Nick
+        mn = _re.search(r'(?:Никнейм|Ник|Nick)\s*:?\s*\n?\s*([A-Za-zА-Яа-яЁё][\w]{2,}(?:_[\w]{2,})?)', text, _re.IGNORECASE)
+        if mn:
+            result['nick'] = mn.group(1).strip()
+
+        # Пароль — ищем после Пароль/Password
+        mp = _re.search(r'(?:Пароль|Password)\s*:?\s*\n?\s*([A-Za-z0-9!@#$%^&*()+\-=_]{4,})', text, _re.IGNORECASE)
+        if mp:
+            result['pass'] = mp.group(1).strip()
+
+        # Деньги — ищем вирты/сумму
+        mm = _re.search(r'(?:Количество виртов|Виртов|Сумма заказа|Деньги|Вирты)\s*:?\s*\n?\s*([\d\s.,]+)', text, _re.IGNORECASE)
+        if mm:
+            raw = mm.group(1).strip().replace(' ','').replace(',','').replace('.','')
+            try: result['money'] = int(raw)
+            except: result['money'] = 0
+        else:
+            result['money'] = 0
+
+        # Номер заказа
+        mo = _re.search(r'Заказ\s*[:#]?\s*([A-Z0-9]{3,})', text, _re.IGNORECASE)
+        if mo:
+            result['order'] = mo.group(1).strip()
+
+        if 'nick' in result and 'pass' in result:
+            return result
+        return None
+
+    # ── Формат 3: ручной ввод "сервер ник пароль [деньги]" ──────────────────
+    # Разделители: пробел, запятая, слэш
+    parts = [p.strip() for p in _re.split(r'[,/]|\s+', text.strip()) if p.strip()]
+    if len(parts) < 3:
+        return None
+
+    # Первая часть — сервер (слово или число)
+    srv_id = find_server(parts[0])
+    if not srv_id:
+        return None
+
+    # Вторая часть — ник (обычно Слово_Слово или просто слово)
+    nick = parts[1]
+    if not _re.match(r'^[A-Za-zА-Яа-яЁё][\w]{1,}', nick):
+        return None
+
+    # Третья часть — пароль
+    password = parts[2]
+
+    # Четвёртая (опционально) — деньги
+    money = 0
+    if len(parts) >= 4:
+        try: money = int(parts[3].replace('.','').replace(',',''))
+        except: money = 0
+
+    return {
+        'serverId': srv_id,
+        'nick': nick,
+        'pass': password,
+        'money': money,
+    }
+
+
+async def _quick_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE, parsed: dict):
+    """Добавляет аккаунт из распарсенных данных и отправляет подтверждение."""
+    srv_id = parsed['serverId']
+
+    if srv_id not in SERVERS:
+        await update.message.reply_text(
+            f"❌ Сервер #{srv_id} не найден.", reply_markup=kb_menu()
+        )
+        return
+
+    # Дубликат?
+    existing = [a for a in DB['accounts'] if a['serverId'] == srv_id and a['nick'] == parsed['nick']]
+    if existing:
+        await update.message.reply_text(
+            f"⚠️ Аккаунт <code>{parsed['nick']}</code> уже есть на "
+            f"#{srv_id} {SERVERS[srv_id]}!\n\nЕсли хочешь обновить — удали старый через меню.",
+            parse_mode="HTML", reply_markup=kb_menu()
+        )
+        return
+
+    order = parsed.get('order', '')
+    note = f"MoneyTravis · #{order}" if order else "Быстрое добавление"
+
+    acc = {
+        "id": new_id(),
+        "serverId": srv_id,
+        "nick": parsed['nick'],
+        "pass": parsed['pass'],
+        "money": parsed['money'],
+        "note": note
+    }
+    DB["accounts"].append(acc)
+    save_db(DB)
+
+    srv_name = SERVERS[srv_id]
+    total = len(accs_of(srv_id))
+
+    await update.message.reply_text(
+        f"✅ <b>Аккаунт добавлен!</b>\n\n"
+        f"🖥 Сервер: <b>#{srv_id} {srv_name}</b>\n"
+        f"👤 Ник: <code>{acc['nick']}</code>\n"
+        f"🔑 Пароль: <code>{acc['pass']}</code>\n"
+        f"💰 Деньги: <b>{fmt_money(acc['money'])}</b>\n"
+        f"📝 {note}\n\n"
+        f"На сервере {srv_name} теперь {total} акк.",
+        parse_mode="HTML", reply_markup=kb_menu()
+    )
+
+
 #!/usr/bin/env python3
 """
 BR Vault Bot — менеджер аккаунтов Black Russia в Telegram
@@ -22,8 +151,215 @@ logging.basicConfig(
 #  КОНФИГ (берётся из переменных окружения)
 # ─────────────────────────────────────────────
 TOKEN        = os.environ.get("BOT_TOKEN", "")
+ALLOWED_ID   = int(os.environ.get("ALLOWED_USER_ID", "0"))  # 0 = любой (небезопасно!)
 DATA_FILE    = "data.json"
 SRV_PER_PAGE = 10   # серверов на одной странице
+
+# ─────────────────────────────────────────────
+#  ПСЕВДОНИМЫ СЕРВЕРОВ (для ручного ввода)
+# ─────────────────────────────────────────────
+SERVER_ALIASES: dict[str, int] = {
+    # #1 Red
+    "red":1,"рэд":1,"ред":1,
+    # #2 Green
+    "green":2,"грин":2,"зеленый":2,"зелёный":2,
+    # #3 Blue
+    "blue":3,"блю":3,"синий":3,
+    # #4 Yellow
+    "yellow":4,"еллоу":4,"желтый":4,"жёлтый":4,
+    # #5 Orange
+    "orange":5,"оранж":5,
+    # #6 Purple
+    "purple":6,"пёрпл":6,"перпл":6,"фиолетовый":6,
+    # #7 Lime
+    "lime":7,"лайм":7,
+    # #8 Pink
+    "pink":8,"пинк":8,"розовый":8,
+    # #9 Cherry
+    "cherry":9,"черри":9,
+    # #10 Black
+    "black":10,"блэк":10,"черный":10,"чёрный":10,
+    # #11 Indigo
+    "indigo":11,"индиго":11,
+    # #12 White
+    "white":12,"вайт":12,"белый":12,
+    # #13 Magenta
+    "magenta":13,"маджента":13,"магента":13,
+    # #14 Crimson
+    "crimson":14,"кримсон":14,
+    # #15 Gold
+    "gold":15,"голд":15,"золото":15,
+    # #16 Azure
+    "azure":16,"эжур":16,"азур":16,
+    # #17 Platinum
+    "platinum":17,"платинум":17,"платина":17,
+    # #18 Aqua
+    "aqua":18,"аква":18,
+    # #19 Gray
+    "gray":19,"grey":19,"грей":19,"серый":19,
+    # #20 Ice
+    "ice":20,"айс":20,"лёд":20,"лед":20,
+    # #21 Chilli
+    "chilli":21,"chili":21,"чилли":21,"чили":21,
+    # #22 Choco
+    "choco":22,"чоко":22,"шоко":22,"шоколад":22,
+    # #23 Moscow
+    "moscow":23,"москва":23,"мск":23,"мосcow":23,
+    # #24 SPB
+    "spb":24,"спб":24,"питер":24,"петербург":24,"санктпетербург":24,"санкт-петербург":24,"санктпитер":24,
+    # #25 UFA
+    "ufa":25,"уфа":25,
+    # #26 Sochi
+    "sochi":26,"сочи":26,
+    # #27 Kazan
+    "kazan":27,"казань":27,"казан":27,
+    # #28 Samara
+    "samara":28,"самара":28,"самар":28,
+    # #29 Rostov
+    "rostov":29,"ростов":29,
+    # #30 Anapa
+    "anapa":30,"анапа":30,
+    # #31 EKB
+    "ekb":31,"екб":31,"екатеринбург":31,"yekaterinburg":31,"ekaterinburg":31,"ёбург":31,"ебург":31,
+    # #32 Krasnodar
+    "krasnodar":32,"краснодар":32,"краснод":32,
+    # #33 Arzamas
+    "arzamas":33,"арзамас":33,
+    # #34 Novosibirsk
+    "novosibirsk":34,"новосибирск":34,"новосиб":34,"новосибирcк":34,
+    # #35 Grozny
+    "grozny":35,"грозный":35,"грозни":35,
+    # #36 Saratov
+    "saratov":36,"саратов":36,
+    # #37 Omsk
+    "omsk":37,"омск":37,
+    # #38 Irkutsk
+    "irkutsk":38,"иркутск":38,
+    # #39 Volgograd
+    "volgograd":39,"волгоград":39,
+    # #40 Voronezh
+    "voronezh":40,"воронеж":40,
+    # #41 Belgorod
+    "belgorod":41,"белгород":41,
+    # #42 Makhachkala
+    "makhachkala":42,"махачкала":42,"махач":42,"makhach":42,
+    # #43 Vladikavkaz
+    "vladikavkaz":43,"владикавказ":43,"влдкавказ":43,
+    # #44 Vladivostok
+    "vladivostok":44,"владивосток":44,"влад":44,"vladik":44,
+    # #45 Kaliningrad
+    "kaliningrad":45,"калининград":45,"калинин":45,
+    # #46 Chelyabinsk
+    "chelyabinsk":46,"челябинск":46,"челяба":46,"chelyaba":46,
+    # #47 Krasnoyarsk
+    "krasnoyarsk":47,"красноярск":47,"красно":47,"краснояр":47,"krasno":47,
+    # #48 Cheboksary
+    "cheboksary":48,"чебоксары":48,"чебоксар":48,
+    # #49 Khabarovsk
+    "khabarovsk":49,"хабаровск":49,"хабар":49,"khabar":49,
+    # #50 Perm
+    "perm":50,"пермь":50,"перм":50,
+    # #51 Tula
+    "tula":51,"тула":51,
+    # #52 Ryazan
+    "ryazan":52,"рязань":52,"рязан":52,
+    # #53 Murmansk
+    "murmansk":53,"мурманск":53,"мурман":53,
+    # #54 Penza
+    "penza":54,"пенза":54,
+    # #55 Kursk
+    "kursk":55,"курск":55,
+    # #56 Arkhangelsk
+    "arkhangelsk":56,"архангельск":56,"архангел":56,"archangel":56,
+    # #57 Orenburg
+    "orenburg":57,"оренбург":57,
+    # #58 Kirov
+    "kirov":58,"киров":58,
+    # #59 Kemerovo
+    "kemerovo":59,"кемерово":59,"кемер":59,
+    # #60 Tyumen
+    "tyumen":60,"тюмень":60,"тюмен":60,
+    # #61 Tolyatti
+    "tolyatti":61,"тольятти":61,"тольяти":61,"тольяттти":61,
+    # #62 Ivanovo
+    "ivanovo":62,"иваново":62,"иваноо":62,
+    # #63 Stavropol
+    "stavropol":63,"ставрополь":63,"ставропол":63,
+    # #64 Smolensk
+    "smolensk":64,"смоленск":64,"смоленcк":64,
+    # #65 Pskov
+    "pskov":65,"псков":65,
+    # #66 Bryansk
+    "bryansk":66,"брянск":66,
+    # #67 Orel
+    "orel":67,"орёл":67,"орел":67,"oryol":67,
+    # #68 Yaroslavl
+    "yaroslavl":68,"ярославль":68,"ярославл":68,
+    # #69 Barnaul
+    "barnaul":69,"барнаул":69,
+    # #70 Lipetsk
+    "lipetsk":70,"липецк":70,
+    # #71 Ulyanovsk
+    "ulyanovsk":71,"ульяновск":71,
+    # #72 Yakutsk
+    "yakutsk":72,"якутск":72,
+    # #73 Tambov
+    "tambov":73,"тамбов":73,
+    # #74 Bratsk
+    "bratsk":74,"братск":74,
+    # #75 Astrakhan
+    "astrakhan":75,"астрахань":75,"астрахан":75,
+    # #76 Chita
+    "chita":76,"чита":76,
+    # #77 Kostroma
+    "kostroma":77,"кострома":77,
+    # #78 Vladimir
+    "vladimir":78,"владимир":78,
+    # #79 Kaluga
+    "kaluga":79,"калуга":79,
+    # #80 N.Novgorod
+    "novgorod":80,"нновгород":80,"нижний":80,"нижновгород":80,"нновг":80,"nnovgorod":80,"nn":80,"нн":80,
+    # #81 Taganrog
+    "taganrog":81,"таганрог":81,
+    # #82 Vologda
+    "vologda":82,"вологда":82,
+    # #83 Tver
+    "tver":83,"тверь":83,"твер":83,
+    # #84 Tomsk
+    "tomsk":84,"томск":84,
+    # #85 Izhevsk
+    "izhevsk":85,"ижевск":85,
+    # #86 Surgut
+    "surgut":86,"сургут":86,
+    # #87 Podolsk
+    "podolsk":87,"подольск":87,"подолск":87,
+    # #88 Magadan
+    "magadan":88,"магадан":88,
+    # #89 Cherepovets
+    "cherepovets":89,"череповец":89,"череповц":89,
+    # #90 Norilsk
+    "norilsk":90,"норильск":90,"норилск":90,
+    # #91 Astana
+    "astana":91,"астана":91,"нурсултан":91,"nursultan":91,
+}
+
+def find_server(query: str) -> int | None:
+    """Ищет сервер по номеру, названию или псевдониму."""
+    q = query.strip().lower().replace("ё","е")
+    # по номеру
+    if q.isdigit():
+        sid = int(q)
+        return sid if sid in SERVERS else None
+    # точное совпадение псевдонима
+    if q in SERVER_ALIASES:
+        return SERVER_ALIASES[q]
+    # частичное совпадение (начало слова)
+    for alias, sid in SERVER_ALIASES.items():
+        if alias.startswith(q) and len(q) >= 3:
+            return sid
+    return None
+
+
 
 # ─────────────────────────────────────────────
 #  СПИСОК СЕРВЕРОВ
@@ -110,6 +446,7 @@ def kb_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Серверы", callback_data="servers:0:0"),
          InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton("⚡ Быстрое добавление", callback_data="quick_help")],
         [InlineKeyboardButton("🔍 Поиск по нику", callback_data="search_start")],
         [InlineKeyboardButton("💾 Экспорт", callback_data="export"),
          InlineKeyboardButton("📂 Импорт", callback_data="import_hint")],
@@ -300,6 +637,30 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await edit(text_stats(), back_kb)
 
     # ── экспорт ───────────────────────────────
+    elif d == "quick_help":
+        txt = (
+            "⚡ <b>Быстрое добавление аккаунта</b>\n\n"
+            "Просто перешли мне сообщение от <b>MoneyTravis бота</b> — "
+            "аккаунт добавится автоматически.\n\n"
+            "Или напиши вручную в одну строку:\n"
+            "<code>сервер ник пароль деньги</code>\n\n"
+            "<b>Примеры:</b>\n"
+            "<code>красноярск Weety_Talbert Id6DBxAPOo 575000</code>\n"
+            "<code>47 Weety_Talbert Id6DBxAPOo 575000</code>\n"
+            "<code>краснояр Weety_Talbert Id6DBxAPOo</code>\n"
+            "<code>white Nick_Name PassWord123 100000</code>\n\n"
+            "<b>Как писать сервер:</b>\n"
+            "По номеру: <code>47</code>\n"
+            "По-русски: <code>красноярск</code> или <code>красно</code>\n"
+            "По-английски: <code>krasnoyarsk</code> или <code>krasno</code>\n\n"
+            "<b>Популярные серверы:</b>\n"
+            "москва/moscow/23 · питер/spb/24 · краснояр/47\n"
+            "вайт/white/12 · астана/astana/91 · екб/ekb/31\n"
+            "чили/chilli/21 · голд/gold/15 · блэк/black/10\n\n"
+            "Деньги можно не указывать — поставится 0."
+        )
+        await edit(txt, InlineKeyboardMarkup([[InlineKeyboardButton("◀ Меню", callback_data="menu")]]))
+
     elif d == "export":
         await _send_export(q.message)
 
@@ -373,6 +734,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────
 #  ХЭНДЛЕР СООБЩЕНИЙ (диалог ввода)
 # ─────────────────────────────────────────────
+
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update): return
 
@@ -384,6 +746,14 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     state = ctx.user_data.get("state")
     text  = (update.message.text or "").strip()
+
+    # ── быстрое добавление по форме MoneyTravis ──────────
+    if text and not state:
+        parsed = _parse_moneytravis(text)
+        if parsed:
+            await _quick_add(update, ctx, parsed)
+            return
+
     if not state or not text:
         return
 
